@@ -5,7 +5,7 @@
 \alias{MeasureSurvUnoTPR}
 \title{Uno's TPR Survival Measure}
 \description{
-Calls \code{\link[survAUC:survAUC_Uno]{survAUC::sens.uno()}}.
+Calls \code{\link[survAUC:sens.uno]{survAUC::sens.uno()}}.
 
 Assumes random censoring.
 

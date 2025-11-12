@@ -136,6 +136,7 @@ Collate:
     'PipeOpPredClassifSurvIPCW.R'
     'PipeOpPredRegrSurvPEM.R'
     'PipeOpProbregrCompositor.R'
+    'PipeOpRandomEffect.R'
     'PipeOpResponseCompositor.R'
     'PipeOpSurvAvg.R'
     'PipeOpTaskSurvClassifDiscTime.R'

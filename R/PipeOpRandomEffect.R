@@ -6,20 +6,23 @@ PipeOpRandomEffect <- R6::R6Class(
       super$initialize(
         id = id,
         input  = data.table::data.table(name = "input",  train = "Task", predict = "Task"),
-        output = data.table::data.table(name = "output", train = "Task", predict = "Task")
+        output = data.table::data.table(name = "output", train = "Task", predict = "Task"),
+        packages = c("mlr3proba", "lme4", "data.table")
       )
     }
   ),
   private = list(
 
     .train = function(inputs) {
-      min_pts <- self$param_set$values$min_points
       task <- inputs[[1L]]
       fun_cols <- private$.tfd_cols(task)
       if (length(fun_cols) == 0) stop("No functional (tfd_*) columns found.")
+
       dt_fun <- task$data(cols = fun_cols)
       models <- setNames(vector("list", length(fun_cols)), fun_cols)
       feat_pieces <- vector("list", length(fun_cols)); names(feat_pieces) <- fun_cols
+      names(feat_pieces) <- fun_cols
+
       # fit models
       for (nm in fun_cols) {
         x <- dt_fun[[nm]]
@@ -28,8 +31,12 @@ PipeOpRandomEffect <- R6::R6Class(
         # fit model
         models[[nm]] <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
         feats <- lme4::ranef(models[[nm]])$id
-        setDT(feats)
-        setnames(feats, sprintf("%s_%s", nm, c("random_intercept", "random_slope")))
+
+        feats$id <- as.integer(rownames(feats))
+        data.table::setDT(feats)
+        data.table::setorder(feats, id)
+        feats[, id := NULL]
+        data.table::setnames(feats, sprintf("%s_%s", nm, c("random_intercept", "random_slope")))
         feat_pieces[[nm]] <- feats
       }
       feat_dt <- do.call(cbind, unname(feat_pieces))

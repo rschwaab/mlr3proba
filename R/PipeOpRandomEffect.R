@@ -2,7 +2,7 @@ PipeOpRandomEffect <- R6::R6Class(
   "PipeOpRandomEffect",
   inherit = mlr3pipelines::PipeOp,
   public = list(
-    initialize = function(id = "fda.random_effect") {
+    initialize = function(id = "proba.random_effect") {
       super$initialize(
         id = id,
         input  = data.table::data.table(name = "input",  train = "Task", predict = "Task"),
@@ -27,6 +27,7 @@ PipeOpRandomEffect <- R6::R6Class(
       for (nm in fun_cols) {
         x <- dt_fun[[nm]]
         tab <- as.data.frame(x, unnest = TRUE)
+        # error message needed
         tab <- stats::na.omit(tab)
         # fit model
         models[[nm]] <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
@@ -39,10 +40,11 @@ PipeOpRandomEffect <- R6::R6Class(
         data.table::setnames(feats, sprintf("%s_%s", nm, c("random_intercept", "random_slope")))
         feat_pieces[[nm]] <- feats
       }
+      browser()
       feat_dt <- do.call(cbind, unname(feat_pieces))
       keep_cols <- c(setdiff(task$feature_names, fun_cols), task$target_names)
       dt_keep   <- task$data(cols = keep_cols)
-      dt_new <- data.table::as.data.table(cbind(dt_keep, feat_dt))
+      dt_new <- data.table::as.data.table(cbind(dt_keep, feat_dt)) # join on subject ids
       stopifnot(nrow(dt_new) == task$nrow)
       backend <- mlr3::as_data_backend(dt_new)
       new_task <- mlr3proba::TaskSurv$new(
@@ -58,7 +60,7 @@ PipeOpRandomEffect <- R6::R6Class(
         models   = models,
         fun_cols = fun_cols,
         re_names = names(feat_dt)
-      )
+      ) # only save necessary info that I actually use in predict (check how much memory is saved)
 
       list(new_task)
     },
@@ -92,7 +94,7 @@ PipeOpRandomEffect <- R6::R6Class(
 
         ids <- unique(tab$id)
         n_id <- length(ids)
-
+        browser()
         u_hat <- matrix(NA_real_, nrow = n_id, ncol = 2L,
                         dimnames = list(as.character(ids),
                         c("random_intercept", "random_slope")))
@@ -112,7 +114,7 @@ PipeOpRandomEffect <- R6::R6Class(
           u_hat[j, ] <- as.numeric(D %*% t(Z) %*% solve(V, residual))
         }
         feats <- data.table::as.data.table(u_hat)
-        feats[, id := as.integer(rownames(u_hat))]
+        feats[, id := as.integer(rownames(u_hat))] #same story as above ids
         data.table::setorder(feats, id)
         feats[, id := NULL]
 
@@ -150,3 +152,7 @@ PipeOpRandomEffect <- R6::R6Class(
 register_pipeop("random_effect", PipeOpRandomEffect)
 
 # https://chatgpt.com/c/6909faa8-6ad8-8328-b931-673bf45e6766
+
+# - Make sure ids work properly (match on subject ids)
+# - Create Version 1: save only relevant stuff during .train in state and use this
+# - Create Version 2: save full model and use lme4 predict function instead of manual calculations

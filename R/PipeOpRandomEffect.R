@@ -7,7 +7,7 @@ PipeOpRandomEffect <- R6::R6Class(
         id = id,
         input  = data.table::data.table(name = "input",  train = "Task", predict = "Task"),
         output = data.table::data.table(name = "output", train = "Task", predict = "Task"),
-        packages = c("mlr3proba", "lme4", "data.table")
+        packages = c("mlr3", "mlr3proba", "lme4", "data.table")
       )
     }
   ),
@@ -15,37 +15,67 @@ PipeOpRandomEffect <- R6::R6Class(
 
     .train = function(inputs) {
       task <- inputs[[1L]]
+      id_col <- private$.get_id_col(task)
       fun_cols <- private$.tfd_cols(task)
       if (length(fun_cols) == 0) stop("No functional (tfd_*) columns found.")
 
+      # data for functional columns
       dt_fun <- task$data(cols = fun_cols)
+
+      # all other columns
+      keep_cols <- unique(c(id_col, setdiff(task$feature_names, fun_cols), task$target_names))
+      dt_keep <- data.table::as.data.table(task$data(cols = keep_cols))
+
+      # join keys
+      id_orig <- dt_keep[[id_col]]
+      dt_keep[, (id_col) := as.character(get(id_col))]
+      task_ids <- unique(dt_keep[[id_col]])
+
+      #  build RE feature table via joins
+      dt_re <- unique(dt_keep[, ..id_col])
+
       models <- setNames(vector("list", length(fun_cols)), fun_cols)
-      feat_pieces <- vector("list", length(fun_cols)); names(feat_pieces) <- fun_cols
-      names(feat_pieces) <- fun_cols
 
       # fit models
       for (nm in fun_cols) {
         x <- dt_fun[[nm]]
         tab <- as.data.frame(x, unnest = TRUE)
-        # error message needed
         tab <- stats::na.omit(tab)
+        tab_ids <- unique(as.character(tab$id))
+
+        # check for missing/extra ids
+        missing_ids <- setdiff(task_ids, tab_ids)
+        if (length(missing_ids)) {
+          stop(sprintf("'%s': no observations after na.omit for %d subject(s), e.g. %s",
+                       nm, length(missing_ids), paste(head(missing_ids, 5), collapse = ", ")))
+        }
+
+        extra_ids <- setdiff(tab_ids, task_ids)
+        if (length(extra_ids)) {
+          stop(sprintf("'%s': found %d id(s) in tfd not present in task, e.g. %s",
+                       nm, length(extra_ids), paste(head(extra_ids, 5), collapse = ", ")))
+        }
+
         # fit model
         models[[nm]] <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
-        feats <- lme4::ranef(models[[nm]])$id
+        feats <- data.table::as.data.table(lme4::ranef(models[[nm]])$id, keep.rownames = id_col)
+        feats[, (id_col) := as.character(get(id_col))]
 
-        feats$id <- as.integer(rownames(feats))
-        data.table::setDT(feats)
-        data.table::setorder(feats, id)
-        feats[, id := NULL]
-        data.table::setnames(feats, sprintf("%s_%s", nm, c("random_intercept", "random_slope")))
-        feat_pieces[[nm]] <- feats
+        re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
+        data.table::setnames(feats, c(id_col, "(Intercept)", "arg"), c(id_col, re_cols))
+
+        dt_re <- feats[dt_re, on = id_col]
+        private$.assert_all_ids_present(dt_re, id_col, re_cols, context = paste0("train/", nm))
       }
-      browser()
-      feat_dt <- do.call(cbind, unname(feat_pieces))
-      keep_cols <- c(setdiff(task$feature_names, fun_cols), task$target_names)
-      dt_keep   <- task$data(cols = keep_cols)
-      dt_new <- data.table::as.data.table(cbind(dt_keep, feat_dt)) # join on subject ids
+      # join RE features back to the kept columns by id (no cbind)
+      dt_new <- dt_re[dt_keep, on = id_col]
       stopifnot(nrow(dt_new) == task$nrow)
+
+      # restore original id type
+      if (is.factor(id_orig)) {
+        dt_new[, (id_col) := factor(get(id_col), levels = levels(id_orig))]
+      }
+
       backend <- mlr3::as_data_backend(dt_new)
       new_task <- mlr3proba::TaskSurv$new(
         id = task$id,
@@ -53,13 +83,14 @@ PipeOpRandomEffect <- R6::R6Class(
         time  = task$target_names[1L],
         event = task$target_names[2L]
       )
-
-
+      # preserve grouping semantics
+      new_task$col_roles$group = id_col
+      new_task$col_roles$feature = setdiff(new_task$col_roles$feature, id_col)
 
       self$state <- list(
         models   = models,
         fun_cols = fun_cols,
-        re_names = names(feat_dt)
+        id_col   = id_col
       ) # only save necessary info that I actually use in predict (check how much memory is saved)
 
       list(new_task)
@@ -69,21 +100,44 @@ PipeOpRandomEffect <- R6::R6Class(
       task <- inputs[[1L]]
       st <- self$state
       fun_cols <- st$fun_cols
+      if (length(fun_cols) == 0L) return(list(task))
       models <- st$models
-      # check if there are functional columns
-      if (length(fun_cols) == 0L) {
-        return(list(task))
-      }
+      id_col <- st$id_col
+
+      # data for functional columns
       dt_fun <- task$data(cols = fun_cols)
 
-      feat_pieces <- vector(mode = "list" ,length = length(fun_cols))
-      names(feat_pieces) <- fun_cols
+      # all other columns
+      keep_cols <- unique(c(id_col, setdiff(task$feature_names, fun_cols), task$target_names))
+      dt_keep <- data.table::as.data.table(task$data(cols = keep_cols))
+
+      # join keys
+      id_orig <- dt_keep[[id_col]]
+      dt_keep[, (id_col) := as.character(get(id_col))]
+      task_ids <- unique(dt_keep[[id_col]])
+
+      #  build RE feature table via joins
+      dt_re <- unique(dt_keep[, ..id_col])
 
       # PRC formula: û_i = D Z_i^T V_i^{-1}(y_i − X_i β)
       for (nm in fun_cols){
         x <- dt_fun[[nm]]
         tab <- as.data.frame(x, unnest = TRUE)
         tab <- stats::na.omit(tab)
+        tab_ids <- unique(as.character(tab$id))
+
+        # check for missing/extra ids
+        missing_ids <- setdiff(task_ids, tab_ids)
+        if (length(missing_ids)) {
+          stop(sprintf("'%s': no observations after na.omit for %d subject(s), e.g. %s",
+                       nm, length(missing_ids), paste(head(missing_ids, 5), collapse = ", ")))
+        }
+
+        extra_ids <- setdiff(tab_ids, task_ids)
+        if (length(extra_ids)) {
+          stop(sprintf("'%s': found %d id(s) in tfd not present in task, e.g. %s",
+                       nm, length(extra_ids), paste(head(extra_ids, 5), collapse = ", ")))
+        }
 
         # extract LMM parameters from training fit
         mod <- models[[nm]]
@@ -94,7 +148,6 @@ PipeOpRandomEffect <- R6::R6Class(
 
         ids <- unique(tab$id)
         n_id <- length(ids)
-        browser()
         u_hat <- matrix(NA_real_, nrow = n_id, ncol = 2L,
                         dimnames = list(as.character(ids),
                         c("random_intercept", "random_slope")))
@@ -114,22 +167,21 @@ PipeOpRandomEffect <- R6::R6Class(
           u_hat[j, ] <- as.numeric(D %*% t(Z) %*% solve(V, residual))
         }
         feats <- data.table::as.data.table(u_hat)
-        feats[, id := as.integer(rownames(u_hat))] #same story as above ids
-        data.table::setorder(feats, id)
-        feats[, id := NULL]
+        feats[, (id_col) := rownames(u_hat)]
+        feats[, (id_col) := as.character(get(id_col))]
 
-        data.table::setnames(
-          feats,
-          sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
-        )
+        re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
+        data.table::setnames(feats, c("random_intercept", "random_slope"), re_cols)
 
-        feat_pieces[[nm]] <- feats
+        dt_re <- feats[dt_re, on = id_col]
+        private$.assert_all_ids_present(dt_re, id_col, re_cols, context = paste0("predict/", nm))
       }
-      feat_dt <- do.call(cbind, unname(feat_pieces))
-      dt_keep <- task$data(cols = c(setdiff(task$feature_names, fun_cols), task$target_names))
-
-      dt_new <- data.table::as.data.table(cbind(dt_keep, feat_dt))
+      dt_new <- dt_re[dt_keep, on = id_col]
       stopifnot(nrow(dt_new) == task$nrow)
+
+      if (is.factor(id_orig)) {
+        dt_new[, (id_col) := factor(get(id_col), levels = levels(id_orig))]
+      }
 
       backend <- mlr3::as_data_backend(dt_new)
       new_task <- mlr3proba::TaskSurv$new(
@@ -139,13 +191,36 @@ PipeOpRandomEffect <- R6::R6Class(
         event   = task$target_names[2L]
       )
 
+      new_task$col_roles$group = id_col
+      new_task$col_roles$feature = setdiff(new_task$col_roles$feature, id_col)
+
       list(new_task)
     },
     .tfd_cols = function(task, types = c("tfd_irreg", "tfd_reg")) {
       ft <- task$feature_types
       ft[type %in% types, id]
+    },
+    .assert_all_ids_present = function(dt, id_col, new_cols, context = "") {
+      miss <- dt[Reduce(`|`, lapply(new_cols, function(cc) is.na(get(cc)))), get(id_col)]
+      if (length(miss)) {
+        stop(sprintf(
+          "%sMissing random-effect features for %d id(s), e.g.: %s",
+          if (nzchar(context)) paste0(context, ": ") else "",
+          length(unique(miss)),
+          paste(head(unique(miss), 5), collapse = ", ")
+        ))
+      }
+      invisible(TRUE)
+    },
+    .get_id_col = function(task) {
+      id_col <- task$col_roles$group
+      if (length(id_col) == 0L) {
+        if ("subject_id" %in% task$col_names) return("subject_id")
+        stop("No group column set on task and no 'subject_id' column found.")
+      }
+      if (length(id_col) != 1L) stop("Need exactly one group column.")
+      id_col[[1L]]
     }
-
   )
 )
 

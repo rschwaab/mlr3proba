@@ -12,86 +12,41 @@ PipeOpRandomEffect <- R6::R6Class(
     }
   ),
   private = list(
-
     .train = function(inputs) {
       task <- inputs[[1L]]
       id_col <- private$.get_id_col(task)
+
       fun_cols <- private$.tfd_cols(task)
-      if (length(fun_cols) == 0) stop("No functional (tfd_*) columns found.")
+      if (length(fun_cols) == 0L) stop("No functional (tfd_*) columns found.")
 
-      # data for functional columns
-      dt_fun <- task$data(cols = fun_cols)
-
-      # all other columns
-      keep_cols <- unique(c(id_col, setdiff(task$feature_names, fun_cols), task$target_names))
-      dt_keep <- data.table::as.data.table(task$data(cols = keep_cols))
-
-      # join keys
-      id_orig <- dt_keep[[id_col]]
-      dt_keep[, (id_col) := as.character(get(id_col))]
-      task_ids <- unique(dt_keep[[id_col]])
-
-      #  build RE feature table via joins
-      dt_re <- unique(dt_keep[, ..id_col])
+      prep <- private$.prep_tables(task, id_col, fun_cols)
 
       models <- setNames(vector("list", length(fun_cols)), fun_cols)
+      dt_re <- prep$dt_re
 
-      # fit models
       for (nm in fun_cols) {
-        x <- dt_fun[[nm]]
-        tab <- as.data.frame(x, unnest = TRUE)
-        tab <- stats::na.omit(tab)
-        tab_ids <- unique(as.character(tab$id))
+        tab <- private$.tfd_tab(prep$dt_fun, nm)
+        private$.check_ids(prep$task_ids, tab, nm)
 
-        # check for missing/extra ids
-        missing_ids <- setdiff(task_ids, tab_ids)
-        if (length(missing_ids)) {
-          stop(sprintf("'%s': no observations after na.omit for %d subject(s), e.g. %s",
-                       nm, length(missing_ids), paste(head(missing_ids, 5), collapse = ", ")))
-        }
-
-        extra_ids <- setdiff(tab_ids, task_ids)
-        if (length(extra_ids)) {
-          stop(sprintf("'%s': found %d id(s) in tfd not present in task, e.g. %s",
-                       nm, length(extra_ids), paste(head(extra_ids, 5), collapse = ", ")))
-        }
-
-        # fit model
         models[[nm]] <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
-        feats <- data.table::as.data.table(lme4::ranef(models[[nm]])$id, keep.rownames = id_col)
-        feats[, (id_col) := as.character(get(id_col))]
 
-        re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
-        data.table::setnames(feats, c(id_col, "(Intercept)", "arg"), c(id_col, re_cols))
-
-        dt_re <- feats[dt_re, on = id_col]
-        private$.assert_all_ids_present(dt_re, id_col, re_cols, context = paste0("train/", nm))
-      }
-      # join RE features back to the kept columns by id (no cbind)
-      dt_new <- dt_re[dt_keep, on = id_col]
-      stopifnot(nrow(dt_new) == task$nrow)
-
-      # restore original id type
-      if (is.factor(id_orig)) {
-        dt_new[, (id_col) := factor(get(id_col), levels = levels(id_orig))]
+        feats <- private$.extract_train_feats(models[[nm]], id_col)
+        dt_re <- private$.join_feats(dt_re, feats, id_col, nm, context = "train")
       }
 
-      backend <- mlr3::as_data_backend(dt_new)
-      new_task <- mlr3proba::TaskSurv$new(
-        id = task$id,
-        backend = backend,
-        time  = task$target_names[1L],
-        event = task$target_names[2L]
+      new_task <- private$.finalize_task(
+        task   = task,
+        dt_re  = dt_re,
+        dt_keep = prep$dt_keep,
+        id_col = id_col,
+        id_orig = prep$id_orig
       )
-      # preserve grouping semantics
-      new_task$col_roles$group = id_col
-      new_task$col_roles$feature = setdiff(new_task$col_roles$feature, id_col)
 
       self$state <- list(
         models   = models,
         fun_cols = fun_cols,
         id_col   = id_col
-      ) # only save necessary info that I actually use in predict (check how much memory is saved)
+      )
 
       list(new_task)
     },
@@ -99,83 +54,130 @@ PipeOpRandomEffect <- R6::R6Class(
     .predict = function(inputs) {
       task <- inputs[[1L]]
       st <- self$state
+
       fun_cols <- st$fun_cols
       if (length(fun_cols) == 0L) return(list(task))
-      models <- st$models
-      id_col <- st$id_col
 
-      # data for functional columns
+      id_col <- st$id_col
+      prep <- private$.prep_tables(task, id_col, fun_cols)
+
+      dt_re <- prep$dt_re
+
+      for (nm in fun_cols) {
+        tab <- private$.tfd_tab(prep$dt_fun, nm)
+        private$.check_ids(prep$task_ids, tab, nm)
+
+        feats <- private$.prc_predict_feats(st$models[[nm]], tab, id_col)
+        dt_re <- private$.join_feats(dt_re, feats, id_col, nm, context = "predict")
+      }
+
+      new_task <- private$.finalize_task(
+        task   = task,
+        dt_re  = dt_re,
+        dt_keep = prep$dt_keep,
+        id_col = id_col,
+        id_orig = prep$id_orig
+      )
+
+      list(new_task)
+    },
+    .prep_tables = function(task, id_col, fun_cols) {
       dt_fun <- task$data(cols = fun_cols)
 
-      # all other columns
       keep_cols <- unique(c(id_col, setdiff(task$feature_names, fun_cols), task$target_names))
       dt_keep <- data.table::as.data.table(task$data(cols = keep_cols))
 
-      # join keys
       id_orig <- dt_keep[[id_col]]
       dt_keep[, (id_col) := as.character(get(id_col))]
       task_ids <- unique(dt_keep[[id_col]])
 
-      #  build RE feature table via joins
+      # unique ids only -> prevents cartesian explosion if task ever has repeated ids
       dt_re <- unique(dt_keep[, ..id_col])
 
-      # PRC formula: û_i = D Z_i^T V_i^{-1}(y_i − X_i β)
-      for (nm in fun_cols){
-        x <- dt_fun[[nm]]
-        tab <- as.data.frame(x, unnest = TRUE)
-        tab <- stats::na.omit(tab)
-        tab_ids <- unique(as.character(tab$id))
+      list(
+        dt_fun   = dt_fun,
+        dt_keep  = dt_keep,
+        id_orig  = id_orig,
+        task_ids = task_ids,
+        dt_re    = dt_re
+      )
+    },
+    .tfd_tab = function(dt_fun, nm) {
+      x <- dt_fun[[nm]]
+      tab <- as.data.frame(x, unnest = TRUE)
+      stats::na.omit(tab)
+    },
+    .check_ids = function(task_ids, tab, nm) {
+      tab_ids <- unique(as.character(tab$id))
 
-        # check for missing/extra ids
-        missing_ids <- setdiff(task_ids, tab_ids)
-        if (length(missing_ids)) {
-          stop(sprintf("'%s': no observations after na.omit for %d subject(s), e.g. %s",
-                       nm, length(missing_ids), paste(head(missing_ids, 5), collapse = ", ")))
-        }
-
-        extra_ids <- setdiff(tab_ids, task_ids)
-        if (length(extra_ids)) {
-          stop(sprintf("'%s': found %d id(s) in tfd not present in task, e.g. %s",
-                       nm, length(extra_ids), paste(head(extra_ids, 5), collapse = ", ")))
-        }
-
-        # extract LMM parameters from training fit
-        mod <- models[[nm]]
-        beta <- lme4::fixef(mod)
-        # double check this
-        D <- as.matrix(lme4::VarCorr(mod)$id)
-        sigma2 <- lme4::getME(mod, "sigma")^2
-
-        ids <- unique(tab$id)
-        n_id <- length(ids)
-        u_hat <- matrix(NA_real_, nrow = n_id, ncol = 2L,
-                        dimnames = list(as.character(ids),
-                        c("random_intercept", "random_slope")))
-
-        for (j in seq_along(ids)){
-          id_j <- ids[j]
-          dat_j <- tab[tab$id == id_j, ]
-
-          y <- dat_j$value
-          arg <- dat_j$arg
-
-          X <- cbind(1, arg)
-          Z <- X
-          residual <- y - X %*% beta
-          V <- Z %*% D %*% t(Z) + sigma2 * diag(nrow(Z))
-          # solve(V, residual) = V^{-1} %*% residual
-          u_hat[j, ] <- as.numeric(D %*% t(Z) %*% solve(V, residual))
-        }
-        feats <- data.table::as.data.table(u_hat)
-        feats[, (id_col) := rownames(u_hat)]
-        feats[, (id_col) := as.character(get(id_col))]
-
-        re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
-        data.table::setnames(feats, c("random_intercept", "random_slope"), re_cols)
-
-        dt_re <- feats[dt_re, on = id_col]
-        private$.assert_all_ids_present(dt_re, id_col, re_cols, context = paste0("predict/", nm))
+      missing_ids <- setdiff(task_ids, tab_ids)
+      if (length(missing_ids)) {
+        stop(sprintf(
+          "'%s': no observations after na.omit for %d subject(s), e.g. %s",
+          nm, length(missing_ids), paste(head(missing_ids, 5), collapse = ", ")
+        ))
       }
+
+      extra_ids <- setdiff(tab_ids, task_ids)
+      if (length(extra_ids)) {
+        stop(sprintf(
+          "'%s': found %d id(s) in tfd not present in task, e.g. %s",
+          nm, length(extra_ids), paste(head(extra_ids, 5), collapse = ", ")
+        ))
+      }
+
+      invisible(TRUE)
+    },
+    .extract_train_feats = function(mod, id_col) {
+      data.table::as.data.table(lme4::ranef(mod)$id, keep.rownames = id_col)
+    },
+    .prc_predict_feats = function(mod, tab, id_col) {
+      beta <- lme4::fixef(mod)
+      D <- as.matrix(lme4::VarCorr(mod)$id)
+      sigma2 <- lme4::getME(mod, "sigma")^2
+
+      ids <- unique(as.character(tab$id))
+
+      u_hat <- matrix(
+        NA_real_, nrow = length(ids), ncol = 2L,
+        dimnames = list(ids, c("random_intercept", "random_slope"))
+      )
+
+      for (j in seq_along(ids)) {
+        id_j <- ids[j]
+        dat_j <- tab[as.character(tab$id) == id_j, ]
+
+        y <- dat_j$value
+        arg <- dat_j$arg
+
+        X <- cbind(1, arg)
+        Z <- X
+        residual <- y - X %*% beta
+        V <- Z %*% D %*% t(Z) + sigma2 * diag(nrow(Z))
+
+        u_hat[j, ] <- as.numeric(D %*% t(Z) %*% solve(V, residual))
+      }
+
+      feats <- data.table::as.data.table(u_hat)
+      feats[, (id_col) := rownames(u_hat)]
+      feats
+    },
+    .join_feats = function(dt_re, feats, id_col, nm, context = "") {
+      feats[, (id_col) := as.character(get(id_col))]
+
+      re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
+
+      if (all(c("(Intercept)", "arg") %in% names(feats))) {
+        data.table::setnames(feats, c(id_col, "(Intercept)", "arg"), c(id_col, re_cols))
+      } else {
+        data.table::setnames(feats, c("random_intercept", "random_slope"), re_cols)
+      }
+
+      dt_re <- feats[dt_re, on = id_col]
+      private$.assert_all_ids_present(dt_re, id_col, re_cols, context = paste0(context, "/", nm))
+      dt_re
+    },
+    .finalize_task = function(task, dt_re, dt_keep, id_col, id_orig) {
       dt_new <- dt_re[dt_keep, on = id_col]
       stopifnot(nrow(dt_new) == task$nrow)
 
@@ -194,7 +196,7 @@ PipeOpRandomEffect <- R6::R6Class(
       new_task$col_roles$group = id_col
       new_task$col_roles$feature = setdiff(new_task$col_roles$feature, id_col)
 
-      list(new_task)
+      new_task
     },
     .tfd_cols = function(task, types = c("tfd_irreg", "tfd_reg")) {
       ft <- task$feature_types
@@ -225,6 +227,7 @@ PipeOpRandomEffect <- R6::R6Class(
 )
 
 register_pipeop("random_effect", PipeOpRandomEffect)
+
 
 # https://chatgpt.com/c/6909faa8-6ad8-8328-b931-673bf45e6766
 

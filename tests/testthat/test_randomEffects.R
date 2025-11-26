@@ -9,24 +9,24 @@ test_that("PipeOpRandomEffect train and predict match on same data", {
   library(tf)
 
   # create task
-  data("pbc2data", package = "pencal")
+  data(pbc2data)
   baseline <- pbc2data$baselineInfo
-  long     <- pbc2data$longitudinalInfo
+  long <- pbc2data$longitudinalInfo
 
   # create backend data.table with tfd() longitudinal features
-  pbc2_backend <- data.table(
-    subject_id   = as.factor(baseline$id),
-    time         = baseline$time,
-    event        = baseline$event,
-    baselineAge  = baseline$baselineAge,
-    sex          = baseline$sex,
-    treatment    = baseline$treatment,
-    serBilir     = tfd(long, id = "id", arg = "fuptime", value = "serBilir"),
-    albumin      = tfd(long, id = "id", arg = "fuptime", value = "albumin"),
-    alkaline     = tfd(long, id = "id", arg = "fuptime", value = "alkaline"),
-    SGOT         = tfd(long, id = "id", arg = "fuptime", value = "SGOT"),
-    platelets    = tfd(long, id = "id", arg = "fuptime", value = "platelets"),
-    prothrombin  = tfd(long, id = "id", arg = "fuptime", value = "prothrombin")
+  pbc2_backend = data.table(
+    subject_id = as.factor(baseline$id),
+    time = baseline$time,
+    event = baseline$event,
+    baselineAge = baseline$baselineAge,
+    sex = baseline$sex,
+    treatment = baseline$treatment,
+    serBilir = tfd(long, id = "id", arg = "fuptime", value = "serBilir"),
+    albumin = tfd(long, id = "id", arg = "fuptime", value = "albumin"),
+    alkaline = tfd(long, id = "id", arg = "fuptime", value = "alkaline"),
+    SGOT = tfd(long, id = "id", arg = "fuptime", value = "SGOT"),
+    platelets = tfd(long, id = "id", arg = "fuptime", value = "platelets"),
+    prothrombin = tfd(long, id = "id", arg = "fuptime", value = "prothrombin")
   )
 
   # remove any rows with missing baseline / functional entries
@@ -42,6 +42,8 @@ test_that("PipeOpRandomEffect train and predict match on same data", {
     time    = "time",
     event   = "event"
   )
+  task$col_roles$group = "subject_id"
+  task$col_roles$feature = setdiff(task$col_roles$feature, "subject_id")
 
   # Train and predict with PipeOpRandomEffect on the SAME task
 

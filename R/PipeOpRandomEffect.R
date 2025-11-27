@@ -176,6 +176,8 @@ PipeOpRandomEffect <- R6::R6Class(
 
       re_cols <- sprintf("%s_%s", nm, c("random_intercept", "random_slope"))
 
+
+      # i don't think this is necessary anymore
       if (all(c("(Intercept)", "arg") %in% names(feats))) {
         data.table::setnames(feats, c(id_col, "(Intercept)", "arg"), c(id_col, re_cols))
       } else {
@@ -226,8 +228,7 @@ PipeOpRandomEffect <- R6::R6Class(
     .get_id_col = function(task) {
       id_col <- task$col_roles$group
       if (length(id_col) == 0L) {
-        if ("subject_id" %in% task$col_names) return("subject_id")
-        stop("No group column set on task and no 'subject_id' column found.")
+        stop("No group column set on task.")
       }
       if (length(id_col) != 1L) stop("Need exactly one group column.")
       id_col[[1L]]

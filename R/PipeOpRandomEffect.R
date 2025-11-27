@@ -21,17 +21,20 @@ PipeOpRandomEffect <- R6::R6Class(
 
       prep <- private$.prep_tables(task, id_col, fun_cols)
 
-      models <- setNames(vector("list", length(fun_cols)), fun_cols)
+      params <- setNames(vector("list", length(fun_cols)), fun_cols)
+
       dt_re <- prep$dt_re
 
       for (nm in fun_cols) {
         tab <- private$.tfd_tab(prep$dt_fun, nm)
         private$.check_ids(prep$task_ids, tab, nm)
 
-        models[[nm]] <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
+        mod <- lme4::lmer(value ~ arg + (1 + arg | id), data = tab)
 
-        feats <- private$.extract_train_feats(models[[nm]], id_col)
+        feats <- private$.extract_train_feats(mod, id_col)
         dt_re <- private$.join_feats(dt_re, feats, id_col, nm, context = "train")
+
+        params[[nm]] <- private$.extract_lmm_params(mod)
       }
 
       new_task <- private$.finalize_task(
@@ -43,11 +46,10 @@ PipeOpRandomEffect <- R6::R6Class(
       )
 
       self$state <- list(
-        models   = models,
+        params   = params,
         fun_cols = fun_cols,
         id_col   = id_col
       )
-
       list(new_task)
     },
 
@@ -67,7 +69,7 @@ PipeOpRandomEffect <- R6::R6Class(
         tab <- private$.tfd_tab(prep$dt_fun, nm)
         private$.check_ids(prep$task_ids, tab, nm)
 
-        feats <- private$.prc_predict_feats(st$models[[nm]], tab, id_col)
+        feats <- private$.prc_predict_feats(st$params[[nm]], tab, id_col)
         dt_re <- private$.join_feats(dt_re, feats, id_col, nm, context = "predict")
       }
 
@@ -131,10 +133,17 @@ PipeOpRandomEffect <- R6::R6Class(
     .extract_train_feats = function(mod, id_col) {
       data.table::as.data.table(lme4::ranef(mod)$id, keep.rownames = id_col)
     },
-    .prc_predict_feats = function(mod, tab, id_col) {
-      beta <- lme4::fixef(mod)
-      D <- as.matrix(lme4::VarCorr(mod)$id)
-      sigma2 <- lme4::getME(mod, "sigma")^2
+    .extract_lmm_params = function(mod) {
+      list(
+        beta   = as.numeric(lme4::fixef(mod)),
+        D      = as.matrix(lme4::VarCorr(mod)$id),
+        sigma2 = lme4::getME(mod, "sigma")^2
+      )
+    },
+    .prc_predict_feats = function(params, tab, id_col) {
+      beta <- params$beta
+      D <- params$D
+      sigma2 <- params$sigma2
 
       ids <- unique(as.character(tab$id))
 

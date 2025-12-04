@@ -227,9 +227,7 @@ PipeOpRandomEffect <- R6::R6Class(
     },
     .get_id_col = function(task) {
       id_col <- task$col_roles$group
-      if (length(id_col) == 0L) {
-        stop("No group column set on task.")
-      }
+      if (length(id_col) == 0L) stop("No group column set on task.")
       if (length(id_col) != 1L) stop("Need exactly one group column.")
       id_col[[1L]]
     }
@@ -241,6 +239,3 @@ register_pipeop("random_effect", PipeOpRandomEffect)
 
 # https://chatgpt.com/c/6909faa8-6ad8-8328-b931-673bf45e6766
 
-# - Make sure ids work properly (match on subject ids)
-# - Create Version 1: save only relevant stuff during .train in state and use this
-# - Create Version 2: save full model and use lme4 predict function instead of manual calculations

@@ -84,6 +84,7 @@ PipeOpRandomEffect <- R6::R6Class(
       list(new_task)
     },
     .prep_tables = function(task, id_col, fun_cols) {
+      browser()
       dt_fun <- task$data(cols = fun_cols)
 
       keep_cols <- unique(c(id_col, setdiff(task$feature_names, fun_cols), task$target_names))

@@ -1,4 +1,3 @@
-# Landmarking PipeOp: strict landmarking + at-risk filtering + target rebasing
 PipeOpLandmark <- R6::R6Class(
   "PipeOpLandmark",
   inherit = mlr3pipelines::PipeOp,
@@ -9,7 +8,7 @@ PipeOpLandmark <- R6::R6Class(
         id = id,
         param_set = paradox::ps(
           landmark_time = paradox::p_dbl(lower = 0, tags = c("train", "predict")),
-          strict        = paradox::p_lgl(init = TRUE, tags = c("train", "predict")),  # reserved for future use
+          strict        = paradox::p_lgl(init = TRUE, tags = c("train", "predict")),
           drop_empty    = paradox::p_lgl(init = TRUE, tags = c("train", "predict"))
         ),
         input  = data.table::data.table(name = "input",  train = "Task", predict = "Task"),
@@ -23,7 +22,6 @@ PipeOpLandmark <- R6::R6Class(
 
     .train = function(inputs) {
       task <- inputs[[1L]]
-
       lm_t <- self$param_set$values$landmark_time
       checkmate::assert_number(lm_t, lower = 0, finite = TRUE)
 
@@ -51,86 +49,94 @@ PipeOpLandmark <- R6::R6Class(
     .landmark_transform = function(task, lm_t, idcol, fun_cols) {
       if (length(fun_cols) == 0L) stop("No functional (tfd_*) columns found.")
 
-      drop_empty <- isTRUE(self$param_set$values$drop_empty)
+      drop_empty <- self$param_set$values$drop_empty
 
-      # pull required columns (id + features + target)
+      # pull required columns
       keep_cols <- unique(c(idcol, task$feature_names, task$target_names))
       dt <- data.table::as.data.table(task$data(cols = keep_cols))
 
       time_name  <- task$target_names[1L]
       event_name <- task$target_names[2L]
 
-      # 1) keep only subjects still at risk at landmark time
+      # 1) Filter at-risk
       dt <- dt[get(time_name) > lm_t]
       if (nrow(dt) == 0L) stop("No subjects remain at risk at landmark_time = ", lm_t, ".")
 
-      # 2) truncate each tfd feature at arg <= lm_t and gather IDs with any pre-LM data
       ids_keep_fun <- as.character(dt[[idcol]])
       tabs_trunc <- setNames(vector("list", length(fun_cols)), fun_cols)
 
       for (nm in fun_cols) {
         x   <- dt[[nm]]
+
+        # Ensure x names match the ID column to prevent ID misalignment
+        # This is a crucial safety step if row order changed
+        if (is.null(names(x))) names(x) <- as.character(dt[[idcol]])
+
         tab <- as.data.frame(x, unnest = TRUE)
+
+        # 2) Strict Filter: Remove NAs and truncate time
         tab <- tab[!is.na(tab$arg) & !is.na(tab$value) & tab$arg <= lm_t, , drop = FALSE]
-        stopifnot(all(tab$arg <= lm_t + 1e-12, na.rm = TRUE))
+
+        # --- NEW STEP 2.5: SANITIZE ARGUMENTS ---
+        # 1. Round to 6 decimal places to fix floating point jitter
+        tab$arg <- round(tab$arg, 6)
+
+        # 2. Check for duplicates. If a subject has two values at t=0.5, keep the first one.
+        # This prevents the "(Almost) non-unique" error.
+        is_dup <- duplicated(tab[, c("id", "arg")])
+        if (any(is_dup)) {
+          warning(sprintf("Removed %d duplicate time points for feature %s (e.g. ID %s at t=%s)",
+                          sum(is_dup), nm, tab$id[which(is_dup)[1]], tab$arg[which(is_dup)[1]]))
+          tab <- tab[!is_dup, , drop = FALSE]
+        }
+        # ----------------------------------------
 
         ids_with_data <- unique(as.character(tab$id))
-        ids_keep_fun  <- intersect(ids_keep_fun, ids_with_data)   # strict policy
-
-        # store truncated long table; assignment happens after filtering/reordering
+        ids_keep_fun  <- intersect(ids_keep_fun, ids_with_data)
         tabs_trunc[[nm]] <- tab
       }
 
-      # 3) drop subjects without pre-LM data for ALL functional features (strict)
+      # 3) Drop empty subjects
       if (drop_empty) {
         dt <- dt[as.character(get(idcol)) %in% ids_keep_fun]
-        if (nrow(dt) == 0L) {
-          stop("After strict landmarking, no subject has pre-landmark data for all functional features.")
-        }
+        if (nrow(dt) == 0L) stop("No subjects have pre-landmark data.")
       }
 
-      # 4) rebuild each tfd column, aligned & named to match dt row order
+      # 4) Rebuild tfd columns
       ord_ids <- as.character(dt[[idcol]])
 
       for (nm in fun_cols) {
         tab <- tabs_trunc[[nm]]
         tab$id <- as.character(tab$id)
-        tab    <- tab[tab$id %in% ord_ids, , drop = FALSE]
-        tab    <- tab[order(match(tab$id, ord_ids), tab$arg), , drop = FALSE]
 
+        # Filter to survivors
+        tab <- tab[tab$id %in% ord_ids, , drop = FALSE]
+
+        # Order by ID then Arg to ensure clean reconstruction
+        tab <- tab[order(match(tab$id, ord_ids), tab$arg), , drop = FALSE]
+
+        # Rebuild
         col <- tf::tfd(tab, id = "id", arg = "arg", value = "value")
 
-        # ensure names exist; then reorder and force final names to ord_ids
+        # Align names strictly
+        # tf::tfd might return names in the order of 'tab', which we just sorted to match 'ord_ids'
+        # But we double check with match()
         nms <- names(col)
         if (is.null(nms)) nms <- unique(tab$id)
+
         idx <- match(ord_ids, nms)
-        if (anyNA(idx)) {
-          stop("Missing/unnamed tfd elements for ids: ",
-               paste(ord_ids[is.na(idx)], collapse = ", "))
-        }
+        if (anyNA(idx)) stop("Internal Error: Mismatch between Data ID and TFD ID during reconstruction")
+
         col <- col[idx]
-        names(col) <- ord_ids
-
-        if (length(col) != nrow(dt)) {
-          stop(sprintf("Internal error: length mismatch for %s: %d vs %d",
-                       nm, length(col), nrow(dt)))
-        }
-
-        # sanity check mirroring RE's na.omit view
-        un <- stats::na.omit(as.data.frame(col, unnest = TRUE))
-        miss <- setdiff(ord_ids, unique(as.character(un$id)))
-        if (length(miss)) {
-          stop(sprintf("Strict LM check: '%s' has no pre-LM data for ids: %s",
-                       nm, paste(head(miss, 5), collapse = ", ")))
-        }
+        names(col) <- ord_ids # Force names
 
         dt[[nm]] <- col
       }
 
-      # 5) rebase survival time to time since landmark
+      # 5) Rebase Time
       dt[, (time_name) := get(time_name) - lm_t]
 
-      # 6) rebuild TaskSurv and restore roles
+      # 6) Finalize
       backend <- mlr3::as_data_backend(dt)
       new_task <- mlr3proba::TaskSurv$new(
         id      = task$id,
@@ -157,5 +163,4 @@ PipeOpLandmark <- R6::R6Class(
     }
   )
 )
-
 register_pipeop("landmark", PipeOpLandmark)

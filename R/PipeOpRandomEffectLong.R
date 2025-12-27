@@ -1,4 +1,102 @@
-# --------------- PipeOp: Random effects from a Long table -----------------
+#' @title Random-Effects Feature Extraction from a Longitudinal Table
+#'
+#' @name mlr_pipeops_random_effect_long
+#' @aliases PipeOpRandomEffectLong
+#' @description
+#' Fits a linear mixed model (random intercept and random slope over time) for each selected
+#' longitudinal feature and appends the subject-specific random effects as new features to a survival
+#' task (`TaskSurv`).
+#'
+#' The PipeOp expects a *long* table (class `"Long"`, typically a `data.table`) on a second input
+#' channel and returns the augmented task on its output channel.
+#'
+#' @details
+#' This PipeOp expects the input task to have exactly one group column (subject identifier) set via
+#' `task$col_roles$group`. The longitudinal table must contain the subject id column `long_id_col`, the
+#' time column `long_time_col`, and the selected longitudinal features.
+#'
+#' During training, for each feature \eqn{y} in `feature_cols`, a linear mixed model is fit using
+#' \pkg{lme4}:
+#' \deqn{y \sim t + (1 + t \mid id)}
+#' where \eqn{t} is the longitudinal time variable (`long_time_col`) and \eqn{id} is the longitudinal
+#' subject identifier (`long_id_col`).
+#'
+#' The per-subject random intercept and random slope are extracted and joined onto the task's data by
+#' subject id, creating two new features per longitudinal feature:
+#' \itemize{
+#'   \item `"<feature>_random_intercept"`
+#'   \item `"<feature>_random_slope"`
+#' }
+#'
+#' At prediction time, the PipeOp computes BLUP-style random effect estimates for each subject from
+#' the stored training-time model parameters (fixed effects, random-effects covariance, residual
+#' variance), using only the new longitudinal data provided at predict-time.
+#'
+#'
+#' @section Parameters:
+#' \describe{
+#' \item{long_id_col (`character(1)`)}{Column name in `long` holding the subject identifier (default: `"id"`).}
+#' \item{long_time_col (`character(1)`)}{Column name in `long` holding the measurement time (default: `"fuptime"`).}
+#' \item{feature_cols (`character`)}{Names of longitudinal feature columns in `long` to model. If `NULL`,
+#' numeric columns are auto-detected (excluding `long_id_col` and `long_time_col`).}
+#' }
+#'
+#' @section Input and Output Channels:
+#' \describe{
+#' \item{Input}{`"task"`: a [`mlr3::Task`], typically a [`mlr3proba::TaskSurv`].\cr
+#' `"long"`: a longitudinal table of class `"Long"` containing `long_id_col`, `long_time_col`, and the
+#' columns in `feature_cols`.}
+#' \item{Output}{`"output"`: the input task augmented with random-effect features (a [`mlr3proba::TaskSurv`]).}
+#' }
+#'
+#' @section State:
+#' Stores the following values during training for reuse at predict-time:
+#' \itemize{
+#'   \item `params`: per-feature model parameters (`beta`, `D`, `sigma2`),
+#'   \item resolved `feature_cols`,
+#'   \item task group (id) column name,
+#'   \item `long_id_col`, `long_time_col`.
+#' }
+#'
+#' @section Internals:
+#' The PipeOp requires that every subject present in the task has at least one non-missing longitudinal
+#' observation for each selected feature; otherwise it errors. Longitudinal rows with missing id, time,
+#' or feature values are dropped per feature.
+#'
+#' @examples
+#' library(mlr3)
+#' library(mlr3proba)
+#' library(mlr3pipelines)
+#' library(data.table)
+#'
+#' # Example survival task
+#' dt <- data.table(
+#'   id = 1:5,
+#'   x1 = rnorm(5),
+#'   time = c(10, 8, 12, 3, 20),
+#'   status = c(1, 0, 1, 1, 0)
+#' )
+#' task <- TaskSurv$new("toy", backend = dt, time = "time", event = "status")
+#' task$col_roles$group <- "id"
+#'
+#' # Example long table
+#' long <- data.table(
+#'   id = rep(1:5, each = 4),
+#'   fuptime = rep(c(1, 3, 6, 9), times = 5),
+#'   biomarker = rnorm(20),
+#'   lab = rnorm(20)
+#' )
+#' class(long) <- c("Long", class(long))
+#'
+#' pop <- po("random_effect_long",
+#'   long_id_col = "id",
+#'   long_time_col = "fuptime",
+#'   feature_cols = c("biomarker", "lab")
+#' )
+#'
+#' out <- pop$train(list(task, long))
+#' out[[1]]  # augmented TaskSurv
+
 PipeOpRandomEffectLong <- R6::R6Class(
   "PipeOpRandomEffectLong",
   inherit = mlr3pipelines::PipeOp,

@@ -1,4 +1,92 @@
-# --------------------- PipeOp: Landmark on long table ---------------------
+#' @title Landmarking of a Survival Task with a Longitudinal Table
+#'
+#' @name mlr_pipeops_landmark_long
+#' @aliases PipeOpLandmarkLong
+#' @description
+#' Creates a *landmark dataset* from a survival task (`TaskSurv`) and a subject-level longitudinal
+#' table (`long`). At a given `landmark_time`, the PipeOp:
+#' \itemize{
+#'   \item keeps only subjects still at risk (`time > landmark_time`),
+#'   \item rebases survival time by subtracting `landmark_time`,
+#'   \item filters longitudinal rows to those subjects and measurements taken at or before the landmark,
+#'   \item (optionally) drops subjects without enough longitudinal information (`min_points`).
+#' }
+#'
+#' The filtered longitudinal table is returned on a second output channel and is given class `"Long"`.
+#'
+#' @details
+#' This PipeOp expects the input task to have exactly one group column (subject identifier) set via
+#' `task$col_roles$group`. The survival target is assumed to be in the order returned by
+#' `task$target_names`, where the first target is the time column and the second target is the event
+#' column.
+#'
+#' If `long_features` is `NULL`, numeric longitudinal feature columns are auto-detected from `long`
+#' (excluding `long_id_col` and `long_time_col`).
+#'
+#' @section Parameters:
+#' \describe{
+#' \item{landmark_time (`numeric(1)`)}{Landmark time \eqn{t_L \ge 0}. Subjects with `time <= landmark_time`
+#' are removed and remaining survival times are rebased by subtracting `landmark_time`. Must be set.}
+#' \item{drop_empty (`logical(1)`)}{If `TRUE` (default), subjects that do not meet the `min_points`
+#' requirement for *any* longitudinal feature are removed from both the task and the longitudinal output.}
+#' \item{min_points (`integer(1)`)}{Minimum number of *non-missing* longitudinal measurements required
+#' per subject and per longitudinal feature (default: `1`). The requirement is enforced feature-wise and
+#' combined strictly across all `long_features` (intersection over features).}
+#' \item{long (`data.frame` | `data.table`)}{Longitudinal table. Must contain `long_id_col`, `long_time_col`,
+#' and all `long_features`. Must be provided at train-time; may be replaced at predict-time.}
+#' \item{long_id_col (`character(1)`)}{Column name in `long` holding the subject identifier (default: `"id"`).}
+#' \item{long_time_col (`character(1)`)}{Column name in `long` holding the measurement time (default: `"fuptime"`).}
+#' \item{long_features (`character`)}{Names of longitudinal feature columns in `long`. If `NULL`,
+#' numeric columns are auto-detected (excluding id/time columns).}
+#' }
+#'
+#' @section Input and Output Channels:
+#' \describe{
+#' \item{Input}{`"input"`: a [`mlr3::Task`], typically a [`mlr3proba::TaskSurv`].}
+#' \item{Output}{`"task"`: a rebased [`mlr3proba::TaskSurv`].\cr
+#' `"long"`: a filtered `data.table` with class `"Long"` containing columns
+#' `long_id_col`, `long_time_col`, and `long_features`, ordered by id and time.}
+#' }
+#'
+#' @examples
+#' library(mlr3)
+#' library(mlr3proba)
+#' library(mlr3pipelines)
+#' library(data.table)
+#'
+#' # Example survival task
+#' dt <- data.table(
+#'   id = 1:5,
+#'   x1 = rnorm(5),
+#'   time = c(10, 8, 12, 3, 20),
+#'   status = c(1, 0, 1, 1, 0)
+#' )
+#' task <- TaskSurv$new("toy", backend = dt, time = "time", event = "status")
+#' task$col_roles$group <- "id"
+#'
+#' # Example long table (multiple rows per id)
+#' long <- data.table(
+#'   id = rep(1:5, each = 3),
+#'   fuptime = rep(c(1, 4, 7), times = 5),
+#'   biomarker = rnorm(15),
+#'   lab = rnorm(15)
+#' )
+#'
+#' pop <- po("landmark_long",
+#'   landmark_time = 5,
+#'   long = long,
+#'   long_id_col = "id",
+#'   long_time_col = "fuptime",
+#'   long_features = c("biomarker", "lab"),
+#'   min_points = 1L,
+#'   drop_empty = TRUE
+#' )
+#'
+#' out <- pop$train(list(task))
+#' out$task  # rebased TaskSurv
+#' out$long  # filtered longitudinal table (class "Long")
+
+
 PipeOpLandmarkLong <- R6::R6Class(
   "PipeOpLandmarkLong",
   inherit = mlr3pipelines::PipeOp,
